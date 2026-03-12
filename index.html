@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<title>배당성장 트래커</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { background:#0a0e1a; font-family:'Noto Sans KR',sans-serif; }
+  input,button,select { outline:none; }
+  ::-webkit-scrollbar { display:none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+const THIS_YEAR = new Date().getFullYear();
+const DEFAULT_YEARS = [2023,2024,2025,2026];
+
+const INITIAL_STOCKS = [
+  { id:1, name:"미국배당다우존스", ticker:"458730", shares:190, avgPrice:14362,
+    isMonthly:true, dividends:{2023:168,2024:439,2025:428,2026:110} },
+  { id:2, name:"KB금융", ticker:"105560", shares:2, avgPrice:148100,
+    isMonthly:false, dividends:{2023:2470,2024:3900,2025:3566,2026:0} },
+];
+const INITIAL_GOALS = { monthlyDividend:400000, annualDividend:5000000, cash:300000, targetCash:30000000 };
+
+function loadLS(key,fb){ try{const v=localStorage.getItem(key);return v?JSON.parse(v):fb;}catch{return fb;} }
+function saveLS(key,val){ try{localStorage.setItem(key,JSON.stringify(val));}catch{} }
+
+function annualTotal(stock,year){ const p=stock.dividends[year]||0; return stock.isMonthly?p*12*stock.shares:p*stock.shares; }
+function monthlyETF(stock,year){ return stock.isMonthly?(stock.dividends[year]||0)*stock.shares:0; }
+
+function calcCAGR(dividends,years){
+  const vals=years.map(y=>dividends[y]||0),nz=vals.filter(v=>v>0);
+  if(nz.length<2) return null;
+  return (Math.pow(nz[nz.length-1]/nz[0],1/(nz.length-1))-1)*100;
+}
+function getStatus(dividends,years){
+  const vals=years.map(y=>dividends[y]||0),r=vals.slice(-3).filter(v=>v>0);
+  if(r.length<2) return "데이터부족";
+  if(r.every((v,i)=>i===0||v>=r[i-1])) return "성장";
+  if(r.every((v,i)=>i===0||v<=r[i-1])) return "감소";
+  return "정체";
+}
+const SS={ 성장:{bg:"#0d3b2e",text:"#22c979",border:"#22c979"}, 감소:{bg:"#3b0d0d",text:"#f06060",border:"#f06060"}, 정체:{bg:"#2e2a0d",text:"#d4b94a",border:"#d4b94a"}, 데이터부족:{bg:"#1a1a2e",text:"#888",border:"#444"} };
+
+function MiniChart({dividends,shares,years,isMonthly}){
+  const vals=years.map(y=>{const p=dividends[y]||0;return isMonthly?p*12*shares:p*shares;});
+  const max=Math.max(...vals,1),w=140,h=40;
+  const pts=vals.map((v,i)=>`${(i/(Math.max(vals.length-1,1)))*w},${h-(v/max)*(h-6)-2}`).join(" ");
+  const color=vals[vals.length-1]>=vals[0]?"#22c979":"#f06060";
+  const uid="g"+years.join("")+vals[0]+shares;
+  return(<svg width={w} height={h} style={{overflow:"visible"}}>
+    <defs><linearGradient id={uid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.3"/><stop offset="100%" stopColor={color} stopOpacity="0"/></linearGradient></defs>
+    <polygon points={`0,${h} ${pts} ${w},${h}`} fill={`url(#${uid})`}/>
+    <polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round"/>
+    {vals.map((v,i)=><circle key={i} cx={(i/(Math.max(vals.length-1,1)))*w} cy={h-(v/max)*(h-6)-2} r="3" fill={color}/>)}
+  </svg>);
+}
+
+function Toast({show}){
+  return(<div style={{position:"fixed",top:20,left:"50%",transform:`translateX(-50%) translateY(${show?0:-70}px)`,background:"#22c979",color:"#0a0e1a",borderRadius:999,padding:"9px 22px",fontSize:13,fontWeight:800,zIndex:9999,transition:"transform 0.3s ease",boxShadow:"0 4px 20px #22c97966",pointerEvents:"none"}}>✓ 저장되었습니다</div>);
+}
+
+function YearManager({years,onClose,onSave}){
+  const [draft,setDraft]=useState([...years]);
+  const [newYear,setNewYear]=useState("");
+  function addYear(){const y=parseInt(newYear);if(!y||y<2000||y>2100||draft.includes(y)){setNewYear("");return;}setDraft([...draft,y].sort((a,b)=>a-b));setNewYear("");}
+  return(<div style={{position:"fixed",inset:0,background:"#000b",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+    <div style={{background:"#111e38",borderRadius:"20px 20px 0 0",padding:24,width:"100%",maxWidth:480,border:"1px solid #1d2f50"}}>
+      <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>📅 연도 관리</div>
+      <div style={{fontSize:11,color:"#6a8aaa",marginBottom:18}}>추가/삭제 시 모든 종목에 자동 적용</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:20}}>
+        {draft.map(y=>(<div key={y} style={{display:"flex",alignItems:"center",gap:6,background:"#0d1528",borderRadius:999,padding:"7px 14px",border:"1px solid #1d2f50"}}>
+          <span style={{fontSize:13,fontWeight:700,color:"#e8eaf0"}}>{y}년</span>
+          {draft.length>1&&<button onClick={()=>setDraft(draft.filter(d=>d!==y))} style={{background:"none",border:"none",color:"#f06060",fontSize:15,cursor:"pointer"}}>✕</button>}
+        </div>))}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:20}}>
+        <input type="number" placeholder={`예: ${THIS_YEAR+1}`} value={newYear} onChange={e=>setNewYear(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addYear()} style={{flex:1,background:"#0d1528",border:"1px solid #4a90d955",borderRadius:10,padding:"11px 14px",color:"#e8eaf0",fontSize:14}}/>
+        <button onClick={addYear} style={{background:"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:10,padding:"11px 18px",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>추가</button>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>onSave(draft)} style={{flex:1,background:"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:12,padding:13,color:"#fff",fontWeight:800,fontSize:14,cursor:"pointer"}}>저장</button>
+        <button onClick={onClose} style={{flex:1,background:"#1a2a45",border:"none",borderRadius:12,padding:13,color:"#8899bb",fontWeight:700,fontSize:14,cursor:"pointer"}}>취소</button>
+      </div>
+    </div>
+  </div>);
+}
+
+function StockForm({stock,years,onSave,onCancel,title}){
+  const [form,setForm]=useState(stock);
+  const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const setDiv=(y,v)=>setForm(f=>({...f,dividends:{...f.dividends,[y]:v}}));
+  const inp=(a)=>({width:"100%",background:"#0d1528",border:`1px solid ${a||"#1d2f50"}`,borderRadius:8,padding:"9px 12px",color:"#e8eaf0",fontSize:14,boxSizing:"border-box"});
+  return(<div style={{background:"#111e38",borderRadius:16,padding:18,marginBottom:16,border:"1px solid #4a90d944"}}>
+    <div style={{fontSize:13,fontWeight:700,color:"#4a90d9",marginBottom:14}}>{title}</div>
+    {[["name","종목명","text"],["ticker","종목코드","text"],["shares","보유주수","number"],["avgPrice","평균매입가","number"]].map(([k,l,t])=>(
+      <div key={k} style={{marginBottom:10}}>
+        <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>{l}</div>
+        <input type={t} value={form[k]||""} placeholder={l} onChange={e=>setF(k,t==="number"?(e.target.value===""?"":Number(e.target.value)):e.target.value)} style={inp()}/>
+      </div>
+    ))}
+    <div style={{marginBottom:14}}>
+      <div style={{fontSize:10,color:"#6a8aaa",marginBottom:8}}>배당 지급 주기</div>
+      <div style={{display:"flex",gap:8}}>
+        {[[true,"📅 월배당 ETF"],[false,"📆 연배당 (분기포함)"]].map(([val,label])=>(
+          <button key={String(val)} onClick={()=>setF("isMonthly",val)} style={{flex:1,padding:"10px 0",borderRadius:10,fontWeight:700,fontSize:12,cursor:"pointer",border:`2px solid ${form.isMonthly===val?(val?"#4ad9c9":"#d4b94a"):"#1d2f50"}`,background:form.isMonthly===val?(val?"#0d2e3b":"#2e2a0d"):"#0d1528",color:form.isMonthly===val?(val?"#4ad9c9":"#d4b94a"):"#5a7090",transition:"all 0.2s"}}>{label}</button>
+        ))}
+      </div>
+      <div style={{fontSize:10,color:"#5a7090",marginTop:6}}>{form.isMonthly?"주당 월배당금 입력 → 자동으로 연배당(×12) 계산":"주당 연배당금 입력 (분기배당도 연간 합산해서 입력)"}</div>
+    </div>
+    <div style={{fontSize:11,color:"#6a8aaa",marginBottom:8}}>연도별 주당 {form.isMonthly?"월":"연"}배당금 (원)</div>
+    <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",paddingBottom:4}}>
+      {years.map(y=>(<div key={y} style={{flex:"0 0 auto",minWidth:66}}>
+        <div style={{fontSize:9,color:"#5a7090",marginBottom:3}}>{y}년</div>
+        <input type="number" value={form.dividends[y]||""} placeholder="0" onChange={e=>setDiv(y,e.target.value===""?"":Number(e.target.value))} style={{...inp(),padding:"7px 8px",fontSize:13,width:66}}/>
+      </div>))}
+    </div>
+    <div style={{display:"flex",gap:8}}>
+      <button onClick={()=>onSave(form)} style={{flex:1,background:"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:10,padding:11,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13}}>저장</button>
+      <button onClick={onCancel} style={{flex:1,background:"#1a2a45",border:"none",borderRadius:10,padding:11,color:"#8899bb",fontWeight:700,cursor:"pointer",fontSize:13}}>취소</button>
+    </div>
+  </div>);
+}
+
+// ── 추가매수 계산기 + 성장 예측 ──────────────────────────────
+function Calculator({stocks,years,goals}){
+  const lastYear=years[years.length-1];
+  const fmt=n=>Number(n||0).toLocaleString("ko-KR");
+
+  // 추가매수 탭
+  const [selId,setSelId]=useState(stocks[0]?.id||"");
+  const [addShares,setAddShares]=useState("");
+  const selStock=stocks.find(s=>s.id===Number(selId))||stocks[0];
+
+  // 성장예측 탭
+  const [forecastYear,setForecastYear]=useState(THIS_YEAR+5);
+  const [calcTab,setCalcTab]=useState("buy"); // buy | forecast
+
+  // ── 추가매수 계산 ──
+  const currentAnn = selStock ? annualTotal(selStock,lastYear) : 0;
+  const perShareAnn = selStock ? (selStock.isMonthly?(selStock.dividends[lastYear]||0)*12:(selStock.dividends[lastYear]||0)) : 0;
+  const addAnn = addShares && selStock ? Number(addShares)*perShareAnn : 0;
+  const totalAnnAll = stocks.reduce((s,st)=>s+annualTotal(st,lastYear),0);
+  const totalMonAll = stocks.reduce((s,st)=>s+monthlyETF(st,lastYear),0);
+  const newTotalAnn = totalAnnAll + addAnn;
+  const newTotalMon = selStock?.isMonthly ? totalMonAll + Number(addShares||0)*(selStock.dividends[lastYear]||0) : totalMonAll;
+  const annGap = Math.max(0,(goals.annualDividend||0)-totalAnnAll);
+  const monGap = Math.max(0,(goals.monthlyDividend||0)-totalMonAll);
+  const sharesNeededAnn = perShareAnn>0 ? Math.ceil(annGap/perShareAnn) : null;
+  const sharesNeededMon = selStock?.isMonthly && (selStock.dividends[lastYear]||0)>0
+    ? Math.ceil(monGap/(selStock.dividends[lastYear]||0)) : null;
+  const costNeededAnn = sharesNeededAnn!=null ? sharesNeededAnn*(selStock?.avgPrice||0) : null;
+  const costNeededMon = sharesNeededMon!=null ? sharesNeededMon*(selStock?.avgPrice||0) : null;
+
+  // ── 성장 예측 ──
+  const yearsAhead = Math.max(1, forecastYear - THIS_YEAR);
+  const forecasts = stocks.map(s=>{
+    const cagr = calcCAGR(s.dividends, years);
+    const lastDiv = s.dividends[lastYear]||0;
+    const lastPrice = s.avgPrice||0;
+    if(!cagr || lastDiv===0) return {stock:s, cagr, futureDiv:null, futureAnn:null, futurePrice:null};
+    const r = cagr/100;
+    const futureDiv = lastDiv * Math.pow(1+r, yearsAhead);
+    const futureAnn = s.isMonthly ? futureDiv*12*s.shares : futureDiv*s.shares;
+    // 주가 예측: 배당성장과 동일한 비율로 성장 가정
+    const futurePrice = lastPrice * Math.pow(1+r, yearsAhead);
+    return {stock:s, cagr, futureDiv, futureAnn, futurePrice};
+  });
+  const totalFutureAnn = forecasts.reduce((s,f)=>s+(f.futureAnn||annualTotal(f.stock,lastYear)),0);
+  const totalFutureMon = forecasts.reduce((s,f)=>{
+    if(!f.stock.isMonthly) return s;
+    return s+(f.futureDiv!=null ? f.futureDiv*f.stock.shares : monthlyETF(f.stock,lastYear));
+  },0);
+
+  return(<div style={{padding:16}}>
+    {/* 현재 배당 총합 요약 */}
+    <div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:14,border:"1px solid #22c97922"}}>
+      <div style={{fontSize:11,color:"#6a8aaa",marginBottom:12}}>💰 현재 받는 배당금 총합</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+        <div style={{background:"#0d1528",borderRadius:12,padding:"12px 14px",border:"1px solid #22c97933"}}>
+          <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>연간 총 배당</div>
+          <div style={{fontSize:18,fontWeight:900,color:"#22c979"}}>₩{fmt(totalAnnAll)}</div>
+          <div style={{fontSize:10,color:"#5a7090",marginTop:2}}>전체 종목 합산</div>
+        </div>
+        <div style={{background:"#0d1528",borderRadius:12,padding:"12px 14px",border:"1px solid #4ad9c933"}}>
+          <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>월 평균 배당</div>
+          <div style={{fontSize:18,fontWeight:900,color:"#4ad9c9"}}>₩{fmt(Math.round(totalAnnAll/12))}</div>
+          <div style={{fontSize:10,color:"#5a7090",marginTop:2}}>연간÷12 환산</div>
+        </div>
+      </div>
+      {/* 목표 갭 */}
+      <div style={{background:"#0d1528",borderRadius:10,padding:"10px 12px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <span style={{fontSize:11,color:"#8899bb"}}>연 배당 목표까지</span>
+          <span style={{fontSize:13,fontWeight:800,color:(goals.annualDividend||0)<=totalAnnAll?"#22c979":"#f06060"}}>
+            {(goals.annualDividend||0)<=totalAnnAll?"🎉 달성!":"₩"+fmt(Math.max(0,(goals.annualDividend||0)-totalAnnAll))+" 부족"}
+          </span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:11,color:"#8899bb"}}>월배당 ETF 목표까지</span>
+          <span style={{fontSize:13,fontWeight:800,color:(goals.monthlyDividend||0)<=totalMonAll?"#22c979":"#f06060"}}>
+            {(goals.monthlyDividend||0)<=totalMonAll?"🎉 달성!":"₩"+fmt(Math.max(0,(goals.monthlyDividend||0)-totalMonAll))+" 부족"}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    {/* 탭 */}
+    <div style={{display:"flex",background:"#0d1528",borderRadius:12,padding:4,marginBottom:14,gap:4}}>
+      {[["buy","🛒 추가매수 계산"],["forecast","📈 성장 예측"]].map(([k,l])=>(
+        <button key={k} onClick={()=>setCalcTab(k)} style={{flex:1,padding:"10px 0",borderRadius:9,border:"none",
+          background:calcTab===k?"#1a2f50":"none",color:calcTab===k?"#4a90d9":"#5a7090",
+          fontSize:12,fontWeight:calcTab===k?700:400,cursor:"pointer",transition:"all 0.2s"}}>{l}</button>
+      ))}
+    </div>
+
+    {/* ── 추가매수 탭 ── */}
+    {calcTab==="buy"&&(<div>
+      <div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #1d2f50"}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:12,color:"#e8eaf0"}}>종목 선택</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+          {stocks.map(s=>(
+            <button key={s.id} onClick={()=>setSelId(s.id)} style={{
+              display:"flex",justifyContent:"space-between",alignItems:"center",
+              padding:"10px 14px",borderRadius:10,cursor:"pointer",
+              border:`2px solid ${selId===s.id?"#4a90d9":"#1d2f50"}`,
+              background:selId===s.id?"#1a2f50":"#0d1528"}}>
+              <div style={{textAlign:"left"}}>
+                <div style={{fontSize:13,fontWeight:700,color:selId===s.id?"#e8eaf0":"#8899bb"}}>{s.name}</div>
+                <div style={{fontSize:10,color:"#5a7090"}}>주당 연배당 ₩{fmt(perShareAnn)} · 현재 {s.shares}주</div>
+              </div>
+              <div style={{fontSize:10,color:s.isMonthly?"#4ad9c9":"#d4b94a"}}>
+                {s.isMonthly?"📅 월배당":"📆 연배당"}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* 추가 매수 시뮬 */}
+        <div style={{fontSize:10,color:"#6a8aaa",marginBottom:6}}>추가 매수 주수 입력</div>
+        <input type="number" value={addShares} placeholder="예: 10" onChange={e=>setAddShares(e.target.value)}
+          style={{width:"100%",background:"#0d1528",border:"1px solid #4a90d955",borderRadius:10,
+            padding:"11px 14px",color:"#e8eaf0",fontSize:16,fontWeight:700,boxSizing:"border-box",marginBottom:12}}/>
+
+        {addShares>0&&(<div style={{background:"#0d1528",borderRadius:10,padding:12,marginBottom:12}}>
+          <div style={{fontSize:11,color:"#6a8aaa",marginBottom:8}}>매수 후 예상</div>
+          <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #1a2540"}}>
+            <span style={{fontSize:12,color:"#8899bb"}}>추가 비용</span>
+            <span style={{fontSize:13,fontWeight:700,color:"#d4b94a"}}>₩{fmt(Number(addShares)*(selStock?.avgPrice||0))}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #1a2540"}}>
+            <span style={{fontSize:12,color:"#8899bb"}}>추가 연배당</span>
+            <span style={{fontSize:13,fontWeight:700,color:"#22c979"}}>+₩{fmt(addAnn)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #1a2540"}}>
+            <span style={{fontSize:12,color:"#8899bb"}}>전체 연배당</span>
+            <span style={{fontSize:13,fontWeight:700,color:"#22c979"}}>₩{fmt(newTotalAnn)}</span>
+          </div>
+          {selStock?.isMonthly&&(
+            <div style={{display:"flex",justifyContent:"space-between",padding:"6px 0"}}>
+              <span style={{fontSize:12,color:"#8899bb"}}>월배당 ETF 합산</span>
+              <span style={{fontSize:13,fontWeight:700,color:"#4ad9c9"}}>₩{fmt(newTotalMon)}</span>
+            </div>
+          )}
+        </div>)}
+
+        {/* 목표 달성 필요 주수 */}
+        <div style={{fontSize:11,color:"#6a8aaa",marginBottom:8}}>목표 달성까지 필요한 주수</div>
+        {sharesNeededAnn!=null&&sharesNeededAnn>0&&(
+          <div style={{background:"#0d2218",borderRadius:10,padding:"10px 14px",marginBottom:8,border:"1px solid #22c97922"}}>
+            <div style={{fontSize:11,color:"#6a8aaa",marginBottom:4}}>연 배당 목표 (₩{fmt(goals.annualDividend)}) 달성</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:16,fontWeight:900,color:"#22c979"}}>{fmt(sharesNeededAnn)}주 추가 필요</span>
+              <span style={{fontSize:12,color:"#5a7090"}}>≈ ₩{fmt(costNeededAnn)}</span>
+            </div>
+          </div>
+        )}
+        {sharesNeededMon!=null&&sharesNeededMon>0&&(
+          <div style={{background:"#0d2e3b",borderRadius:10,padding:"10px 14px",border:"1px solid #4ad9c922"}}>
+            <div style={{fontSize:11,color:"#6a8aaa",marginBottom:4}}>월배당 ETF 목표 (₩{fmt(goals.monthlyDividend)}) 달성</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:16,fontWeight:900,color:"#4ad9c9"}}>{fmt(sharesNeededMon)}주 추가 필요</span>
+              <span style={{fontSize:12,color:"#5a7090"}}>≈ ₩{fmt(costNeededMon)}</span>
+            </div>
+          </div>
+        )}
+        {(sharesNeededAnn===0)&&<div style={{background:"#0d3b2e",borderRadius:10,padding:"10px 14px",border:"1px solid #22c97933",textAlign:"center",color:"#22c979",fontWeight:700}}>🎉 연 배당 목표 이미 달성!</div>}
+      </div>
+    </div>)}
+
+    {/* ── 성장 예측 탭 ── */}
+    {calcTab==="forecast"&&(<div>
+      <div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #1d2f50"}}>
+        <div style={{fontSize:12,fontWeight:700,marginBottom:12,color:"#e8eaf0"}}>📈 목표 연도 설정</div>
+        <div style={{fontSize:10,color:"#6a8aaa",marginBottom:6}}>예측 연도 (현재 {THIS_YEAR}년 기준)</div>
+        <div style={{display:"flex",gap:8,marginBottom:6}}>
+          {[THIS_YEAR+3,THIS_YEAR+5,THIS_YEAR+10].map(y=>(
+            <button key={y} onClick={()=>setForecastYear(y)} style={{
+              flex:1,padding:"9px 0",borderRadius:10,border:`2px solid ${forecastYear===y?"#4a90d9":"#1d2f50"}`,
+              background:forecastYear===y?"#1a2f50":"#0d1528",
+              color:forecastYear===y?"#4a90d9":"#5a7090",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              {y}년
+            </button>
+          ))}
+        </div>
+        <input type="number" value={forecastYear}
+          onChange={e=>setForecastYear(Number(e.target.value)||THIS_YEAR+1)}
+          style={{width:"100%",background:"#0d1528",border:"1px solid #4a90d955",borderRadius:10,
+            padding:"10px 14px",color:"#4a90d9",fontSize:15,fontWeight:700,boxSizing:"border-box",
+            textAlign:"center",marginBottom:4}}/>
+        <div style={{fontSize:10,color:"#5a7090",textAlign:"center"}}>{yearsAhead}년 후 예측 · 과거 배당 CAGR 기반</div>
+      </div>
+
+      {/* 전체 예측 요약 */}
+      <div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #4a90d922"}}>
+        <div style={{fontSize:11,color:"#6a8aaa",marginBottom:12}}>{forecastYear}년 포트폴리오 예측</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:4}}>
+          <div style={{background:"#0d1528",borderRadius:12,padding:"12px 14px",border:"1px solid #22c97933"}}>
+            <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>예상 연 배당</div>
+            <div style={{fontSize:17,fontWeight:900,color:"#22c979"}}>₩{fmt(Math.round(totalFutureAnn))}</div>
+            <div style={{fontSize:10,color:"#5a7090",marginTop:2}}>현재의 {totalAnnAll>0?(totalFutureAnn/totalAnnAll).toFixed(1):"-"}배</div>
+          </div>
+          <div style={{background:"#0d1528",borderRadius:12,padding:"12px 14px",border:"1px solid #4ad9c933"}}>
+            <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>예상 월배당 ETF</div>
+            <div style={{fontSize:17,fontWeight:900,color:"#4ad9c9"}}>₩{fmt(Math.round(totalFutureMon))}</div>
+            <div style={{fontSize:10,color:"#5a7090",marginTop:2}}>현재의 {totalMonAll>0?(totalFutureMon/totalMonAll).toFixed(1):"-"}배</div>
+          </div>
+        </div>
+      </div>
+
+      {/* 종목별 예측 */}
+      {forecasts.map(f=>{
+        const {stock,cagr,futureDiv,futureAnn,futurePrice}=f;
+        const lastDiv=stock.dividends[lastYear]||0;
+        return(<div key={stock.id} style={{background:"#111e38",borderRadius:14,padding:14,marginBottom:10,border:"1px solid #1d2f50"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:800}}>{stock.name}</div>
+              <div style={{fontSize:10,color:"#6a8aaa"}}>{stock.shares}주 보유</div>
+            </div>
+            {cagr!=null
+              ?<div style={{textAlign:"right"}}>
+                  <div style={{fontSize:10,color:"#6a8aaa"}}>배당 CAGR</div>
+                  <div style={{fontSize:16,fontWeight:900,color:cagr>=0?"#22c979":"#f06060"}}>{cagr>=0?"+":""}{cagr.toFixed(1)}%</div>
+                </div>
+              :<div style={{fontSize:11,color:"#5a7090"}}>데이터 부족</div>
+            }
+          </div>
+          {cagr!=null&&futureDiv!=null?(
+            <div style={{display:"flex",gap:6}}>
+              <div style={{flex:1,background:"#0d1528",borderRadius:8,padding:"8px 10px",border:"1px solid #1d2f50"}}>
+                <div style={{fontSize:9,color:"#5a7090",marginBottom:3}}>현재 주당 {stock.isMonthly?"월":"연"}배당</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#c8d0e0"}}>₩{fmt(lastDiv)}</div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",color:"#4a90d9",fontSize:16}}>→</div>
+              <div style={{flex:1,background:"#0d1a2e",borderRadius:8,padding:"8px 10px",border:"1px solid #4a90d933"}}>
+                <div style={{fontSize:9,color:"#5a7090",marginBottom:3}}>{forecastYear}년 예상</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#4a90d9"}}>₩{fmt(Math.round(futureDiv))}</div>
+              </div>
+              <div style={{flex:1,background:"#0d2218",borderRadius:8,padding:"8px 10px",border:"1px solid #22c97933"}}>
+                <div style={{fontSize:9,color:"#5a7090",marginBottom:3}}>연 배당 합계</div>
+                <div style={{fontSize:12,fontWeight:700,color:"#22c979"}}>₩{fmt(Math.round(futureAnn))}</div>
+              </div>
+            </div>
+          ):(
+            <div style={{fontSize:11,color:"#5a7090",padding:"8px 0"}}>배당 데이터가 2개년 이상 있어야 예측 가능해요</div>
+          )}
+          {futurePrice!=null&&(
+            <div style={{marginTop:8,background:"#0d1528",borderRadius:8,padding:"8px 12px",
+              display:"flex",justifyContent:"space-between",alignItems:"center",border:"1px solid #c97aff22"}}>
+              <span style={{fontSize:11,color:"#6a8aaa"}}>주가 예측 (배당 성장률 적용)</span>
+              <div style={{textAlign:"right"}}>
+                <span style={{fontSize:13,fontWeight:700,color:"#c97aff"}}>₩{fmt(Math.round(futurePrice))}</span>
+                <div style={{fontSize:9,color:"#5a7090"}}>현재 ₩{fmt(stock.avgPrice)}</div>
+              </div>
+            </div>
+          )}
+        </div>);
+      })}
+      <div style={{background:"#0d1528",borderRadius:10,padding:"10px 14px",border:"1px solid #1d2f50"}}>
+        <div style={{fontSize:10,color:"#5a7090",textAlign:"center",lineHeight:1.6}}>
+          ⚠️ 과거 배당 CAGR 기반 단순 예측이에요.<br/>실제 배당금·주가는 다를 수 있으니 참고용으로만 활용하세요.
+        </div>
+      </div>
+    </div>)}
+  </div>);
+}
+
+// ── 투자비중 ──────────────────────────────────────────────────
+function WeightChart({stocks}){
+  const total=stocks.reduce((s,st)=>s+st.avgPrice*st.shares,0);
+  if(total===0) return null;
+  const colors=["#4a90d9","#22c979","#d4b94a","#c97aff","#f06060","#4ad9c9","#f09040"];
+  const fmt=n=>Number(n||0).toLocaleString("ko-KR");
+  return(<div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #1d2f50"}}>
+    <div style={{fontSize:11,color:"#6a8aaa",marginBottom:12}}>종목별 투자비중</div>
+    <div style={{display:"flex",borderRadius:999,overflow:"hidden",height:14,marginBottom:14}}>
+      {stocks.map((s,i)=><div key={s.id} style={{width:`${(s.avgPrice*s.shares/total)*100}%`,background:colors[i%colors.length]}}/>)}
+    </div>
+    {stocks.map((s,i)=>{
+      const invested=s.avgPrice*s.shares;
+      return(<div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #1a2540"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{width:10,height:10,borderRadius:3,background:colors[i%colors.length],flexShrink:0}}/>
+          <span style={{fontSize:12,color:"#c8d0e0"}}>{s.name}</span>
+          <span style={{fontSize:9,color:s.isMonthly?"#4ad9c9":"#d4b94a"}}>{s.isMonthly?"월":"연"}</span>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <span style={{fontSize:12,fontWeight:700,color:colors[i%colors.length]}}>{(invested/total*100).toFixed(1)}%</span>
+          <span style={{fontSize:10,color:"#5a7090",marginLeft:6}}>₩{fmt(invested)}</span>
+        </div>
+      </div>);
+    })}
+    <div style={{display:"flex",justifyContent:"space-between",marginTop:10}}>
+      <span style={{fontSize:11,color:"#6a8aaa"}}>총 매수금액</span>
+      <span style={{fontSize:13,fontWeight:800,color:"#e8eaf0"}}>₩{fmt(total)}</span>
+    </div>
+  </div>);
+}
+
+// ════════════════════════════════════════════════════════════
+function App(){
+  const [stocks,    setStocks]   =useState(()=>loadLS("div-stocks7",INITIAL_STOCKS));
+  const [goals,     setGoals]    =useState(()=>loadLS("div-goals7", INITIAL_GOALS));
+  const [years,     setYears]    =useState(()=>loadLS("div-years7", DEFAULT_YEARS));
+  const [tab,       setTab]      =useState("dashboard");
+  const [editGoals, setEditGoals]=useState(false);
+  const [goalDraft, setGoalDraft]=useState(goals);
+  const [showAdd,   setShowAdd]  =useState(false);
+  const [editStock, setEditStock]=useState(null);
+  const [toast,     setToast]    =useState(false);
+  const [showYearMgr,setShowYearMgr]=useState(false);
+
+  useEffect(()=>{saveLS("div-stocks7",stocks);},[stocks]);
+  useEffect(()=>{saveLS("div-goals7", goals); },[goals]);
+  useEffect(()=>{saveLS("div-years7", years); },[years]);
+
+  const showToast=()=>{setToast(true);setTimeout(()=>setToast(false),2000);};
+  const lastYear=years[years.length-1];
+  const fmt=n=>Number(n||0).toLocaleString("ko-KR");
+
+  const totalAnnual =stocks.reduce((s,st)=>s+annualTotal(st,lastYear),0);
+  const totalMonthly=stocks.reduce((s,st)=>s+monthlyETF(st,lastYear),0);
+  const totalInvest =stocks.reduce((s,st)=>s+st.avgPrice*st.shares,0);
+  const avgYield    =totalInvest>0?(totalAnnual/totalInvest)*100:0;
+  const pCash       =Math.min((goals.cash/(goals.targetCash||1))*100,100);
+
+  function handleYearSave(newYears){
+    setYears(newYears);
+    setStocks(stocks.map(s=>{const d={};newYears.forEach(y=>{d[y]=s.dividends[y]||"";});return{...s,dividends:d};}));
+    setShowYearMgr(false);showToast();
+  }
+  function handleAddSave(form){
+    const filled={};years.forEach(y=>{filled[y]=form.dividends[y]||0;});
+    setStocks([...stocks,{...form,id:Date.now(),shares:Number(form.shares)||0,avgPrice:Number(form.avgPrice)||0,dividends:filled}]);
+    setShowAdd(false);showToast();
+  }
+  function handleEditSave(form){
+    setStocks(stocks.map(s=>s.id===form.id?{...form,shares:Number(form.shares)||0,avgPrice:Number(form.avgPrice)||0}:s));
+    setEditStock(null);showToast();
+  }
+  function delStock(id){setStocks(stocks.filter(s=>s.id!==id));showToast();}
+  const newBlank={name:"",ticker:"",shares:"",avgPrice:"",isMonthly:false,dividends:Object.fromEntries(years.map(y=>[y,""]))};
+  const inp=(a)=>({width:"100%",background:"#0d1528",border:`1px solid ${a||"#1d2f50"}`,borderRadius:8,padding:"9px 12px",color:"#e8eaf0",fontSize:14,boxSizing:"border-box"});
+
+  return(<div style={{minHeight:"100vh",background:"#0a0e1a",color:"#e8eaf0",fontFamily:"'Noto Sans KR',sans-serif",maxWidth:480,margin:"0 auto",paddingBottom:80}}>
+    <Toast show={toast}/>
+    {showYearMgr&&<YearManager years={years} onClose={()=>setShowYearMgr(false)} onSave={handleYearSave}/>}
+
+    {/* Header */}
+    <div style={{background:"linear-gradient(135deg,#0d1528,#0a1a35)",padding:"32px 20px 18px",borderBottom:"1px solid #1a2540",position:"sticky",top:0,zIndex:100}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{fontSize:10,letterSpacing:3,color:"#4a90d9",marginBottom:4}}>배당성장 트래커</div>
+          <div style={{fontSize:21,fontWeight:900,letterSpacing:-0.5}}>내 배당 포트폴리오</div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:5}}>
+            <span style={{fontSize:10,color:"#3a5a80"}}>💾 자동저장</span>
+            <button onClick={()=>setShowYearMgr(true)} style={{background:"#1a2a45",border:"1px solid #2a4060",borderRadius:999,padding:"4px 12px",color:"#4a90d9",fontSize:10,fontWeight:700,cursor:"pointer"}}>📅 연도관리</button>
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
+          <div style={{background:"#111e38",borderRadius:10,padding:"8px 12px",textAlign:"right",border:"1px solid #1d2f50"}}>
+            <div style={{fontSize:9,color:"#8899bb"}}>연 배당 (전체)</div>
+            <div style={{fontSize:15,fontWeight:900,color:"#22c979"}}>₩{fmt(totalAnnual)}</div>
+          </div>
+          <div style={{background:"#111e38",borderRadius:10,padding:"8px 12px",textAlign:"right",border:"1px solid #4ad9c933"}}>
+            <div style={{fontSize:9,color:"#8899bb"}}>월배당 ETF</div>
+            <div style={{fontSize:15,fontWeight:900,color:"#4ad9c9"}}>₩{fmt(totalMonthly)}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* Tabs — 4개 */}
+    <div style={{display:"flex",background:"#0d1528",borderBottom:"1px solid #1a2540",position:"sticky",top:112,zIndex:99}}>
+      {[["dashboard","📊 대시보드"],["stocks","📈 종목"],["calc","🧮 계산기"],["goals","🎯 목표"]].map(([k,l])=>(
+        <button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"13px 0",background:"none",border:"none",color:tab===k?"#4a90d9":"#5a7090",fontSize:11,fontWeight:tab===k?700:400,cursor:"pointer",borderBottom:tab===k?"2px solid #4a90d9":"2px solid transparent",transition:"all 0.2s"}}>{l}</button>
+      ))}
+    </div>
+
+    {/* DASHBOARD */}
+    {tab==="dashboard"&&(<div style={{padding:16}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+        {[
+          {label:"총 매수금액",   value:`₩${fmt(totalInvest)}`,   color:"#4a90d9"},
+          {label:"평균 배당수익률",value:`${avgYield.toFixed(2)}%`, color:"#22c979"},
+          {label:"보유 현금",     value:`₩${fmt(goals.cash)}`,     color:"#d4b94a"},
+          {label:"보유 종목 수",  value:`${stocks.length}개`,       color:"#c97aff"},
+        ].map(({label,value,color})=>(
+          <div key={label} style={{background:"#111e38",borderRadius:14,padding:"14px 16px",border:"1px solid #1d2f50"}}>
+            <div style={{fontSize:10,color:"#6a8aaa",marginBottom:6}}>{label}</div>
+            <div style={{fontSize:16,fontWeight:800,color}}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* 전체 배당 합산 카드 */}
+      <div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #22c97933"}}>
+        <div style={{fontSize:11,color:"#6a8aaa",marginBottom:12}}>💰 받는 배당금 합산</div>
+        <div style={{display:"flex",gap:10,marginBottom:12}}>
+          <div style={{flex:1,background:"#0d1528",borderRadius:10,padding:"12px",border:"1px solid #22c97933",textAlign:"center"}}>
+            <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>연간 총합</div>
+            <div style={{fontSize:18,fontWeight:900,color:"#22c979"}}>₩{fmt(totalAnnual)}</div>
+          </div>
+          <div style={{flex:1,background:"#0d1528",borderRadius:10,padding:"12px",border:"1px solid #4ad9c933",textAlign:"center"}}>
+            <div style={{fontSize:10,color:"#6a8aaa",marginBottom:4}}>월 평균</div>
+            <div style={{fontSize:18,fontWeight:900,color:"#4ad9c9"}}>₩{fmt(Math.round(totalAnnual/12))}</div>
+          </div>
+        </div>
+        {/* 목표 달성 프로그레스 */}
+        <div style={{marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:11,color:"#8899bb"}}>연 배당 목표</span>
+            <span style={{fontSize:11,fontWeight:700,color:"#22c979"}}>{Math.min((totalAnnual/(goals.annualDividend||1))*100,100).toFixed(1)}%</span>
+          </div>
+          <div style={{background:"#1a2a45",borderRadius:999,height:8,overflow:"hidden"}}>
+            <div style={{width:`${Math.min((totalAnnual/(goals.annualDividend||1))*100,100)}%`,height:"100%",background:"linear-gradient(90deg,#22c979,#4a90d9)",borderRadius:999,transition:"width 0.6s ease"}}/>
+          </div>
+        </div>
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:11,color:"#8899bb"}}>월배당 ETF 목표</span>
+            <span style={{fontSize:11,fontWeight:700,color:"#4ad9c9"}}>{Math.min((totalMonthly/(goals.monthlyDividend||1))*100,100).toFixed(1)}%</span>
+          </div>
+          <div style={{background:"#1a2a45",borderRadius:999,height:8,overflow:"hidden"}}>
+            <div style={{width:`${Math.min((totalMonthly/(goals.monthlyDividend||1))*100,100)}%`,height:"100%",background:"linear-gradient(90deg,#4ad9c9,#4a90d9)",borderRadius:999,transition:"width 0.6s ease"}}/>
+          </div>
+        </div>
+      </div>
+
+      <WeightChart stocks={stocks}/>
+
+      {/* 현금 목표 */}
+      <div style={{background:"#111e38",borderRadius:14,padding:16,marginBottom:16,border:"1px solid #1d2f50"}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+          <div>
+            <div style={{fontSize:11,color:"#6a8aaa"}}>현금 목표 달성률</div>
+            <div style={{fontSize:12,fontWeight:700,marginTop:3}}>₩{fmt(goals.cash)} / ₩{fmt(goals.targetCash)}</div>
+          </div>
+          <div style={{fontSize:24,fontWeight:900,color:"#d4b94a"}}>{pCash.toFixed(1)}%</div>
+        </div>
+        <div style={{background:"#1a2a45",borderRadius:999,height:10,overflow:"hidden"}}>
+          <div style={{width:`${pCash}%`,height:"100%",background:"linear-gradient(90deg,#d4b94a,#f09040)",borderRadius:999,transition:"width 0.6s ease"}}/>
+        </div>
+      </div>
+
+      {/* 종목 카드 */}
+      <div style={{fontSize:11,color:"#6a8aaa",marginBottom:10,letterSpacing:1}}>종목별 배당 현황</div>
+      {stocks.map(stock=>{
+        const status=getStatus(stock.dividends,years),st=SS[status];
+        const cagr=calcCAGR(stock.dividends,years);
+        const annDiv=annualTotal(stock,lastYear);
+        const invested=stock.avgPrice*stock.shares;
+        const yld=invested>0?(annDiv/invested*100):0;
+        return(<div key={stock.id} style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${st.border}22`}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
+                <span style={{fontSize:15,fontWeight:800}}>{stock.name}</span>
+                <span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:999,background:stock.isMonthly?"#0d2e3b":"#2e2a0d",color:stock.isMonthly?"#4ad9c9":"#d4b94a",border:`1px solid ${stock.isMonthly?"#4ad9c933":"#d4b94a33"}`}}>{stock.isMonthly?"📅 월배당":"📆 연배당"}</span>
+                <span style={{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:999,background:st.bg,color:st.text,border:`1px solid ${st.border}55`}}>{status}</span>
+              </div>
+              <div style={{fontSize:11,color:"#6a8aaa"}}>{stock.ticker} · {stock.shares}주 · 수익률 {yld.toFixed(1)}%</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:14,fontWeight:800,color:"#22c979"}}>연 ₩{fmt(annDiv)}</div>
+              {stock.isMonthly&&<div style={{fontSize:12,fontWeight:700,color:"#4ad9c9"}}>월 ₩{fmt(monthlyETF(stock,lastYear))}</div>}
+            </div>
+          </div>
+          <MiniChart dividends={stock.dividends} shares={stock.shares} years={years} isMonthly={stock.isMonthly}/>
+          <div style={{display:"flex",gap:14,marginTop:10}}>
+            <div style={{fontSize:11,color:"#8899bb"}}>주당 {stock.isMonthly?"월":"연"}배당: <span style={{color:"#e8eaf0",fontWeight:600}}>₩{fmt(stock.dividends[lastYear]||0)}</span></div>
+            {cagr!=null&&<div style={{fontSize:11,color:"#8899bb"}}>CAGR: <span style={{color:cagr>=0?"#22c979":"#f06060",fontWeight:700}}>{cagr>=0?"+":""}{cagr.toFixed(1)}%</span></div>}
+          </div>
+          <div style={{display:"flex",gap:6,marginTop:12,overflowX:"auto",paddingBottom:4}}>
+            {years.map((y,i)=>{
+              const prev=i>0?(stock.dividends[years[i-1]]||0):null;
+              const cur=stock.dividends[y]||0;
+              const up=prev!==null&&cur>prev,dn=prev!==null&&cur<prev;
+              return(<div key={y} style={{flex:"0 0 auto",background:"#0d1528",borderRadius:8,padding:"6px 10px",border:`1px solid ${up?"#22c97444":dn?"#f0606044":"#1d2f50"}`,minWidth:54}}>
+                <div style={{fontSize:9,color:"#5a7090"}}>{y}</div>
+                <div style={{fontSize:11,fontWeight:700,color:up?"#22c979":dn?"#f06060":"#c8d0e0"}}>{cur>0?`₩${fmt(cur)}`:"-"}</div>
+                {up&&<div style={{fontSize:9,color:"#22c979"}}>▲</div>}
+                {dn&&<div style={{fontSize:9,color:"#f06060"}}>▼</div>}
+              </div>);
+            })}
+          </div>
+        </div>);
+      })}
+    </div>)}
+
+    {/* STOCKS */}
+    {tab==="stocks"&&(<div style={{padding:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div style={{fontSize:14,fontWeight:700}}>보유 종목</div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setShowYearMgr(true)} style={{background:"#1a2a45",border:"1px solid #2a4060",borderRadius:999,padding:"9px 14px",color:"#4a90d9",fontSize:11,fontWeight:700,cursor:"pointer"}}>📅 연도</button>
+          <button onClick={()=>{setShowAdd(true);setEditStock(null);}} style={{background:"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:999,padding:"9px 18px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>+ 종목추가</button>
+        </div>
+      </div>
+      {showAdd&&<StockForm stock={newBlank} years={years} title="새 종목 추가" onSave={handleAddSave} onCancel={()=>setShowAdd(false)}/>}
+      {stocks.map(stock=>{
+        const status=getStatus(stock.dividends,years),st=SS[status];
+        const isEdit=editStock?.id===stock.id;
+        return(<div key={stock.id}>
+          {isEdit
+            ?<StockForm stock={{...editStock}} years={years} title="종목 수정" onSave={handleEditSave} onCancel={()=>setEditStock(null)}/>
+            :(<div style={{background:"#111e38",borderRadius:16,padding:16,marginBottom:12,border:"1px solid #1d2f50"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span style={{fontSize:15,fontWeight:800}}>{stock.name}</span>
+                    <span style={{fontSize:9,fontWeight:700,padding:"2px 7px",borderRadius:999,background:stock.isMonthly?"#0d2e3b":"#2e2a0d",color:stock.isMonthly?"#4ad9c9":"#d4b94a",border:`1px solid ${stock.isMonthly?"#4ad9c933":"#d4b94a33"}`}}>{stock.isMonthly?"📅 월배당":"📆 연배당"}</span>
+                    <span style={{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:999,background:st.bg,color:st.text,border:`1px solid ${st.border}55`}}>{status}</span>
+                  </div>
+                  <div style={{fontSize:11,color:"#6a8aaa",marginTop:3}}>{stock.ticker} · {stock.shares}주 · 평단 ₩{fmt(stock.avgPrice)}</div>
+                </div>
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={()=>{setEditStock({...stock});setShowAdd(false);}} style={{background:"#1a2a45",border:"none",borderRadius:8,padding:"7px 13px",color:"#4a90d9",fontSize:11,fontWeight:700,cursor:"pointer"}}>수정</button>
+                  <button onClick={()=>delStock(stock.id)} style={{background:"#2a1a1a",border:"none",borderRadius:8,padding:"7px 13px",color:"#f06060",fontSize:11,fontWeight:700,cursor:"pointer"}}>삭제</button>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6,marginTop:12,overflowX:"auto",paddingBottom:4}}>
+                {years.map((y,i)=>{
+                  const prev=i>0?(stock.dividends[years[i-1]]||0):null,cur=stock.dividends[y]||0;
+                  const up=prev!==null&&cur>prev,dn=prev!==null&&cur<prev;
+                  return(<div key={y} style={{flex:"0 0 auto",background:"#0d1528",borderRadius:8,padding:"6px 10px",border:`1px solid ${up?"#22c97444":dn?"#f0606044":"#1d2f50"}`,minWidth:54,textAlign:"center"}}>
+                    <div style={{fontSize:9,color:"#5a7090"}}>{y}</div>
+                    <div style={{fontSize:11,fontWeight:700,color:up?"#22c979":dn?"#f06060":"#c8d0e0"}}>{cur>0?`₩${fmt(cur)}`:"-"}</div>
+                    {up&&<div style={{fontSize:9,color:"#22c979"}}>▲</div>}
+                    {dn&&<div style={{fontSize:9,color:"#f06060"}}>▼</div>}
+                  </div>);
+                })}
+              </div>
+            </div>)
+          }
+        </div>);
+      })}
+    </div>)}
+
+    {/* CALCULATOR */}
+    {tab==="calc"&&<Calculator stocks={stocks} years={years} goals={goals}/>}
+
+    {/* GOALS */}
+    {tab==="goals"&&(<div style={{padding:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div style={{fontSize:14,fontWeight:700}}>목표 설정</div>
+        <button onClick={()=>{setEditGoals(!editGoals);setGoalDraft(goals);}} style={{background:editGoals?"#1a2a45":"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:999,padding:"9px 18px",color:editGoals?"#8899bb":"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>{editGoals?"취소":"수정"}</button>
+      </div>
+      {[
+        {key:"monthlyDividend",label:"월배당 ETF 목표",  icon:"📅",color:"#4ad9c9",desc:"월배당 ETF에서 매달 받고 싶은 금액"},
+        {key:"annualDividend", label:"연 배당 목표",      icon:"💰",color:"#22c979",desc:"전체 종목 연간 배당 합산 목표"},
+        {key:"cash",           label:"현재 보유 현금",    icon:"💵",color:"#d4b94a",desc:"현재 투자 가능한 현금"},
+        {key:"targetCash",     label:"현금 목표금액",     icon:"🎯",color:"#c97aff",desc:"목표로 하는 현금 보유량"},
+      ].map(({key,label,icon,color,desc})=>(
+        <div key={key} style={{background:"#111e38",borderRadius:16,padding:18,marginBottom:12,border:"1px solid #1d2f50"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span>{icon}</span><span style={{fontSize:13,fontWeight:700}}>{label}</span></div>
+          <div style={{fontSize:10,color:"#5a7090",marginBottom:10}}>{desc}</div>
+          {editGoals
+            ?<input type="number" value={goalDraft[key]||""} placeholder="0" onChange={e=>setGoalDraft({...goalDraft,[key]:e.target.value===""?"":Number(e.target.value)})} style={{width:"100%",background:"#0d1528",border:`1px solid ${color}55`,borderRadius:10,padding:"10px 14px",color,fontSize:20,fontWeight:900,boxSizing:"border-box"}}/>
+            :<div style={{fontSize:22,fontWeight:900,color}}>₩{fmt(goals[key]||0)}</div>
+          }
+        </div>
+      ))}
+      {editGoals&&<button onClick={()=>{setGoals(goalDraft);setEditGoals(false);showToast();}} style={{width:"100%",background:"linear-gradient(135deg,#4a90d9,#22c979)",border:"none",borderRadius:14,padding:15,color:"#fff",fontSize:14,fontWeight:800,cursor:"pointer",marginTop:4}}>목표 저장</button>}
+      {!editGoals&&(<div style={{background:"#0d1528",borderRadius:16,padding:18,marginTop:8,border:"1px solid #1d2f50"}}>
+        <div style={{fontSize:12,color:"#6a8aaa",marginBottom:14}}>📋 현황 요약</div>
+        {[
+          {label:"월배당 ETF 목표까지",value:`₩${fmt(Math.max(0,(goals.monthlyDividend||0)-totalMonthly))} 부족`,color:"#4ad9c9"},
+          {label:"연 배당 목표까지",   value:`₩${fmt(Math.max(0,(goals.annualDividend||0)-totalAnnual))} 부족`, color:"#22c979"},
+          {label:"현금 목표까지",      value:`₩${fmt(Math.max(0,(goals.targetCash||0)-goals.cash))} 남음`,      color:"#d4b94a"},
+        ].map(({label,value,color})=>(
+          <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"11px 0",borderBottom:"1px solid #1a2540"}}>
+            <span style={{fontSize:12,color:"#8899bb"}}>{label}</span>
+            <span style={{fontSize:13,fontWeight:700,color}}>{value}</span>
+          </div>
+        ))}
+      </div>)}
+    </div>)}
+
+    <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#0a0e1a",borderTop:"1px solid #1a2540",padding:"10px 0 18px",display:"flex",justifyContent:"center"}}>
+      <div style={{fontSize:10,color:"#2a3a55"}}>배당성장 트래커 v7.0</div>
+    </div>
+  </div>);
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
